@@ -124,9 +124,15 @@ RUN git clone https://github.com/vishnubk/dedisp.git /software/dedisp && \
 # NVTX: CUDA >= 12.9 images no longer ship the legacy libnvToolsExt library
 # (NVTX v3 is header-only). peasoup only uses NVTX for profiler range
 # annotations, fully guarded by #ifdef USE_NVTX, so build without it.
+# The getpwuid() patch: peasoup's .inf writer dereferences getpwuid() without a
+# null check, which segfaults when the container runs as a uid absent from
+# /etc/passwd (e.g. docker --user; Apptainer injects the host passwd entry so
+# it never sees this). Make it null-safe so timeseries dumps work everywhere.
 RUN git clone https://github.com/vishnubk/peasoup.git /software/peasoup && \
     cd /software/peasoup && \
     git checkout ${PEASOUP_COMMIT} && \
+    sed -i 's|std::string login = getpwuid(getuid())->pw_name;|struct passwd* pw_ent = getpwuid(getuid()); std::string login = pw_ent ? pw_ent->pw_name : "unknown";|' include/data_types/timeseries.hpp && \
+    grep -q "pw_ent" include/data_types/timeseries.hpp && \
     sed -i 's/ -lnvToolsExt//' Makefile && \
     make -j${JOBS} GPU_ARCH_FLAG="${GPU_ARCH_FLAG}" UCFLAGS="" && \
     make install GPU_ARCH_FLAG="${GPU_ARCH_FLAG}" UCFLAGS=""
