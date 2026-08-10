@@ -1,0 +1,19 @@
+# Docker build context = repo root (see docker/Dockerfile).
+# scikit-build-core needs the FULL source tree (CMakeLists.txt, pyproject.toml,
+# README.md, LICENSE, cmake/, include/, lib/, src/, tests/), so only exclude
+# things that are pure build/scratch noise.
+.git
+.gitignore
+.gitattributes
+build/
+.pixi/
+pixi.lock
+papers/
+notebooks/
+.claude/
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.venv/

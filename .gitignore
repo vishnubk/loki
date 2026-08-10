@@ -423,3 +423,8 @@ $RECYCLE.BIN/
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+# LLM/AI-assistant files — always local, never committed (repo policy)
+CLAUDE.md
+AGENTS.md
+.claude/

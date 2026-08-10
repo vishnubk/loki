@@ -38,6 +38,10 @@ option(ENABLE_IPO "Enable Interprocedural Optimization (Link-Time Optimization)"
 set(ENABLE_CUDA "AUTO" CACHE STRING "Enable CUDA support: AUTO, ON, OFF")
 set_property(CACHE ENABLE_CUDA PROPERTY STRINGS "AUTO" "ON" "OFF")
 
+# CPU architecture used for -march in Release builds. Keep "native" for local
+# builds; override (e.g. x86-64-v3) for portable/container builds.
+set(LOKI_MARCH "native" CACHE STRING "CPU architecture for -march (e.g. native, x86-64-v3)")
+
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -85,12 +89,18 @@ target_compile_options(${LOKI_COMPILE_OPTIONS} INTERFACE -Wall -Wextra -Wpedanti
 target_compile_options(
   ${LOKI_COMPILE_OPTIONS} INTERFACE
   $<$<CONFIG:Debug>:-O0;-g>
-  $<$<CONFIG:Release>:-O3;-DNDEBUG;-march=native;-ffast-math>
+  $<$<CONFIG:Release>:-O3;-DNDEBUG;-march=${LOKI_MARCH};-ffast-math>
   $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g>
   $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
 )
 
 # Find CUDA and set up the project
+# Remember whether the user asked for specific CUDA architectures: enable_language(CUDA)
+# below fills CMAKE_CUDA_ARCHITECTURES in with a compiler default, after which we can no
+# longer tell "-DCMAKE_CUDA_ARCHITECTURES=..." apart from "CMake picked something".
+if(DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set(LOKI_USER_CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+endif()
 if(ENABLE_CUDA STREQUAL "ON" OR ENABLE_CUDA STREQUAL "AUTO")
   include(CheckLanguage)
   # nvcc usually lives outside the default PATH (/usr/local/cuda/bin), and build
@@ -148,7 +158,14 @@ if(CMAKE_CUDA_COMPILER)
               $<$<CONFIG:MinSizeRel>:-O2;-DNDEBUG>
               >
   )
-  set(CMAKE_CUDA_ARCHITECTURES native)
+  # Respect -DCMAKE_CUDA_ARCHITECTURES=... from the command line (needed for
+  # portable/container builds targeting several GPUs); default to native.
+  if(NOT DEFINED LOKI_USER_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES
+        native
+        CACHE STRING "CUDA architectures" FORCE
+    )
+  endif()
   message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
   # Disable response files for better IDE integration
   set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES OFF)
