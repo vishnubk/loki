@@ -90,7 +90,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         vim \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 140 \
                            --slave   /usr/bin/g++ g++ /usr/bin/g++-14 \
-    && update-alternatives --install /usr/bin/cpp cpp /usr/bin/cpp-14 140 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -122,11 +121,15 @@ RUN git clone https://github.com/vishnubk/dedisp.git /software/dedisp && \
 # --- peasoup -----------------------------------------------------------------
 # peasoup's Makefile.inc expects DEDISP_DIR=/usr/local, satisfied above.
 # "make install" copies bin/peasoup to /usr/local/bin.
+# NVTX: CUDA >= 12.9 images no longer ship the legacy libnvToolsExt library
+# (NVTX v3 is header-only). peasoup only uses NVTX for profiler range
+# annotations, fully guarded by #ifdef USE_NVTX, so build without it.
 RUN git clone https://github.com/vishnubk/peasoup.git /software/peasoup && \
     cd /software/peasoup && \
     git checkout ${PEASOUP_COMMIT} && \
-    make -j${JOBS} GPU_ARCH_FLAG="${GPU_ARCH_FLAG}" && \
-    make install GPU_ARCH_FLAG="${GPU_ARCH_FLAG}"
+    sed -i 's/ -lnvToolsExt//' Makefile && \
+    make -j${JOBS} GPU_ARCH_FLAG="${GPU_ARCH_FLAG}" UCFLAGS="" && \
+    make install GPU_ARCH_FLAG="${GPU_ARCH_FLAG}" UCFLAGS=""
 
 RUN ldconfig /usr/local/lib
 
