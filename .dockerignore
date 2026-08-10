@@ -17,3 +17,6 @@ notebooks/
 .pytest_cache/
 .ruff_cache/
 .venv/
+.claude/
+CLAUDE.md
+AGENTS.md
