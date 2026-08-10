@@ -1164,10 +1164,8 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            double tsamp,
                            double t_ref,
                            int nthreads) noexcept {
-    using BatchType           = xsimd::batch<float>;
-    constexpr auto kBatchSize = BatchType::size;
-    nthreads                  = std::clamp(nthreads, 1, omp_get_max_threads());
-    const auto nbins_f        = (nbins / 2) + 1;
+    nthreads           = std::clamp(nthreads, 1, omp_get_max_threads());
+    const auto nbins_f = (nbins / 2) + 1;
 
     // Precompute proper_time vector
     AlignedFloatVec proper_time(segment_len);
@@ -1177,45 +1175,23 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
     }
     AlignedFloatVec delta_phasors_r(nfreqs * segment_len);
     AlignedFloatVec delta_phasors_i(nfreqs * segment_len);
-    // --- Helper lambda for the phasors ---
-    // xsimd::sincos requires modulo 2pi phase
-    const auto two_pi = BatchType(2.0F * static_cast<float>(std::numbers::pi));
-    auto compute_base_phasors =
-        [&](SizeType k, AlignedFloatVec& delta_phasors_r,
-            AlignedFloatVec& delta_phasors_i, AlignedFloatVec& proper_time,
-            float phase_factor, SizeType phasor_offset) {
-            const auto phase_raw =
-                phase_factor * BatchType::load_aligned(&proper_time[k]);
-            const auto phase = xsimd::remainder(phase_raw, two_pi);
-            const auto [sin_phase, cos_phase] = xsimd::sincos(phase);
-            cos_phase.store_aligned(&delta_phasors_r[phasor_offset + k]);
-            sin_phase.store_aligned(&delta_phasors_i[phasor_offset + k]);
-        };
-    // Compute base phasors
+    // Compute base phasors with scalar std::cos/std::sin. The previous
+    // xsimd::remainder + xsimd::sincos version produces wrong values when
+    // compiled for AVX2 (-march=x86-64-v3) with -ffast-math; this precompute
+    // is one-shot per execute and far off the hot path, so scalar is safe.
 #pragma omp parallel for num_threads(nthreads) default(none)                   \
     shared(freqs, nfreqs, segment_len, delta_phasors_r, delta_phasors_i,       \
-               proper_time, compute_base_phasors)
+               proper_time)
     for (SizeType ifreq = 0; ifreq < nfreqs; ++ifreq) {
-        const auto phase_factor =
-            static_cast<float>(-2.0 * std::numbers::pi * freqs[ifreq]);
+        const auto phase_factor  = -2.0 * std::numbers::pi * freqs[ifreq];
         const auto phasor_offset = ifreq * segment_len;
-        SizeType j               = 0;
-        for (; j + (2 * kBatchSize) <= segment_len; j += 2 * kBatchSize) {
-            compute_base_phasors(j, delta_phasors_r, delta_phasors_i,
-                                 proper_time, phase_factor, phasor_offset);
-            compute_base_phasors(j + kBatchSize, delta_phasors_r,
-                                 delta_phasors_i, proper_time, phase_factor,
-                                 phasor_offset);
-        }
-        if (j + kBatchSize <= segment_len) {
-            compute_base_phasors(j, delta_phasors_r, delta_phasors_i,
-                                 proper_time, phase_factor, phasor_offset);
-            j += kBatchSize;
-        }
-        for (; j < segment_len; ++j) {
-            const auto phase                   = phase_factor * proper_time[j];
-            delta_phasors_r[phasor_offset + j] = std::cos(phase);
-            delta_phasors_i[phasor_offset + j] = std::sin(phase);
+        for (SizeType j = 0; j < segment_len; ++j) {
+            const auto phase =
+                phase_factor * static_cast<double>(proper_time[j]);
+            delta_phasors_r[phasor_offset + j] =
+                static_cast<float>(std::cos(phase));
+            delta_phasors_i[phasor_offset + j] =
+                static_cast<float>(std::sin(phase));
         }
     }
 
