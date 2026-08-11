@@ -169,13 +169,14 @@ PYBIND11_MODULE(libloki, m) {
                          SizeType nprobs, float prob_min, float snr_final,
                          SizeType nthresholds, float ducy_max, float wtsp,
                          float beam_width, SizeType trials_start,
-                         std::string_view mode, int nthreads) {
+                         std::string_view mode, int nthreads,
+                         std::optional<SizeType> seed) {
                  return std::make_unique<DynamicThresholdScheme>(
                      std::span<const float>(branching_pattern.data(),
                                             branching_pattern.size()),
                      ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
                      nthresholds, ducy_max, wtsp, beam_width, trials_start,
-                     mode, nthreads);
+                     mode, nthreads, seed);
              }),
              py::arg("branching_pattern"), py::arg("ref_ducy"),
              py::arg("nbins") = 64, py::arg("ntrials") = 1024,
@@ -183,7 +184,8 @@ PYBIND11_MODULE(libloki, m) {
              py::arg("snr_final") = 8.0F, py::arg("nthresholds") = 100,
              py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
              py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
-             py::arg("mode") = "legacy", py::arg("nthreads") = 1)
+             py::arg("mode") = "legacy", py::arg("nthreads") = 1,
+             py::arg("seed") = py::none())
         .def("run", &DynamicThresholdScheme::run, py::arg("thres_neigh") = 10)
         .def("save", &DynamicThresholdScheme::save, py::arg("outdir") = "./")
         .def_property_readonly("nstages", &DynamicThresholdScheme::get_nstages)

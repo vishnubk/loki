@@ -2,6 +2,7 @@
 
 #include <format>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -100,7 +101,8 @@ public:
                            float beam_width      = 0.7F,
                            SizeType trials_start = 1,
                            std::string_view mode = "legacy",
-                           int nthreads          = 1);
+                           int nthreads          = 1,
+                           std::optional<SizeType> seed = std::nullopt);
     ~DynamicThresholdScheme();
     DynamicThresholdScheme(DynamicThresholdScheme&&) noexcept;
     DynamicThresholdScheme& operator=(DynamicThresholdScheme&&) noexcept;
@@ -162,7 +164,8 @@ public:
                                SizeType trials_start = 1,
                                std::string_view mode = "legacy",
                                SizeType batch_size   = 256,
-                               int device_id         = 0);
+                               int device_id         = 0,
+                               std::optional<SizeType> seed = std::nullopt);
     ~DynamicThresholdSchemeCUDA();
     DynamicThresholdSchemeCUDA(DynamicThresholdSchemeCUDA&&) noexcept;
     DynamicThresholdSchemeCUDA&

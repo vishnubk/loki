@@ -131,7 +131,27 @@ std::vector<float> get_best_path_thresholds(std::span<const State> states,
     }
 
     if (best == nullptr) {
-        return {};
+        // No final-stage state reaches the requested detection probability.
+        // Report the best achievable cumulative Pd to help the caller decide
+        // whether to re-run (the scheme is stochastic) or lower min_pd.
+        float best_pd    = -1.0F;
+        bool any_nonempty = false;
+        for (SizeType i = 0; i < nthresholds * nprobs; ++i) {
+            const State& s = states[stage_last + i];
+            if (s.is_empty) {
+                continue;
+            }
+            any_nonempty = true;
+            best_pd      = std::max(best_pd, s.success_h1_cumul);
+        }
+        throw std::runtime_error(std::format(
+            "get_best_path_thresholds: no viable threshold path with "
+            "min_pd={}; best achievable cumulative Pd={}. The Monte-Carlo "
+            "scheme is stochastic - re-run the scheme (optionally with a "
+            "different seed) or lower min_pd.",
+            min_pd,
+            any_nonempty ? std::format("{}", best_pd)
+                         : std::string("no non-empty final states")));
     }
 
     std::vector<const State*> backward;

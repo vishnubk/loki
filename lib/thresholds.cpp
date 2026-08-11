@@ -883,7 +883,8 @@ public:
          float beam_width,
          SizeType trials_start,
          std::string_view mode,
-         int nthreads)
+         int nthreads,
+         std::optional<SizeType> seed)
         : m_branching_pattern(branching_pattern.begin(),
                               branching_pattern.end()),
           m_ref_ducy(ref_ducy),
@@ -914,7 +915,7 @@ public:
             m_nstages, snr_final, m_branching_pattern, m_trials_start);
 
         m_rng = std::make_unique<math::ThreadLocalNormalRNG>(
-            std::random_device{}());
+            seed.value_or(std::random_device{}()));
 
         const auto [fold_slots_per_pool, score_slots_per_pool] =
             compute_max_allocations_needed();
@@ -1406,7 +1407,8 @@ DynamicThresholdScheme::DynamicThresholdScheme(
     float beam_width,
     SizeType trials_start,
     std::string_view mode,
-    int nthreads)
+    int nthreads,
+    std::optional<SizeType> seed)
     : m_impl(std::make_unique<Impl>(branching_pattern,
                                     ref_ducy,
                                     nbins,
@@ -1420,7 +1422,8 @@ DynamicThresholdScheme::DynamicThresholdScheme(
                                     beam_width,
                                     trials_start,
                                     mode,
-                                    nthreads)) {}
+                                    nthreads,
+                                    seed)) {}
 DynamicThresholdScheme::~DynamicThresholdScheme() = default;
 DynamicThresholdScheme::DynamicThresholdScheme(
     DynamicThresholdScheme&&) noexcept = default;

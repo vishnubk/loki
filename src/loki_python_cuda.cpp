@@ -93,13 +93,13 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
                          SizeType nthresholds, float ducy_max, float wtsp,
                          float beam_width, SizeType trials_start,
                          std::string_view mode, SizeType batch_size,
-                         int device_id) {
+                         int device_id, std::optional<SizeType> seed) {
                  return std::make_unique<DynamicThresholdSchemeCUDA>(
                      std::span<const float>(branching_pattern.data(),
                                             branching_pattern.size()),
                      ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
                      nthresholds, ducy_max, wtsp, beam_width, trials_start,
-                     mode, batch_size, device_id);
+                     mode, batch_size, device_id, seed);
              }),
              py::arg("branching_pattern"), py::arg("ref_ducy"),
              py::arg("nbins") = 64, py::arg("ntrials") = 1024,
@@ -108,7 +108,7 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
              py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
              py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
              py::arg("mode") = "legacy", py::arg("batch_size") = 256,
-             py::arg("device_id") = 0)
+             py::arg("device_id") = 0, py::arg("seed") = py::none())
         .def("run", &DynamicThresholdSchemeCUDA::run,
              py::arg("thres_neigh") = 10)
         .def("save", &DynamicThresholdSchemeCUDA::save,

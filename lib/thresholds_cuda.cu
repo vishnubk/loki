@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <format>
 #include <memory>
+#include <optional>
 #include <random>
 
 #include <cub/cub.cuh>
@@ -947,7 +948,8 @@ public:
          SizeType trials_start,
          std::string_view mode,
          SizeType batch_size,
-         int device_id)
+         int device_id,
+         std::optional<SizeType> seed)
         : m_branching_pattern(branching_pattern.begin(),
                               branching_pattern.end()),
           m_ref_ducy(ref_ducy),
@@ -986,7 +988,7 @@ public:
                 "DynamicThresholdSchemeCUDA requires at least 2 stages");
         }
 
-        m_seed = std::random_device{}();
+        m_seed = seed.value_or(std::random_device{}());
 
         // Copy data to device
         m_thresholds_d       = m_thresholds;
@@ -1754,7 +1756,8 @@ DynamicThresholdSchemeCUDA::DynamicThresholdSchemeCUDA(
     SizeType trials_start,
     std::string_view mode,
     SizeType batch_size,
-    int device_id)
+    int device_id,
+    std::optional<SizeType> seed)
     : m_impl(std::make_unique<Impl>(branching_pattern,
                                     ref_ducy,
                                     nbins,
@@ -1769,7 +1772,8 @@ DynamicThresholdSchemeCUDA::DynamicThresholdSchemeCUDA(
                                     trials_start,
                                     mode,
                                     batch_size,
-                                    device_id)) {}
+                                    device_id,
+                                    seed)) {}
 DynamicThresholdSchemeCUDA::~DynamicThresholdSchemeCUDA() = default;
 DynamicThresholdSchemeCUDA::DynamicThresholdSchemeCUDA(
     DynamicThresholdSchemeCUDA&&) noexcept = default;

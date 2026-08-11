@@ -1,7 +1,10 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <limits>
+#include <mutex>
 #include <concepts>
 #include <cstdint>
 #include <random>
@@ -238,7 +241,9 @@ public:
      * std::random_device for non-deterministic seed.
      */
     explicit ThreadLocalNormalRNG(uint64_t base_seed = std::random_device{}())
-        : m_base_seed(base_seed) {
+        : m_base_seed(base_seed),
+          m_instance_id(s_instance_counter.fetch_add(
+              1, std::memory_order_relaxed)) {
         std::call_once(s_lut_init_flag, &ThreadLocalNormalRNG::init_lut);
     }
 
@@ -265,7 +270,7 @@ public:
 
     // Generate a random index in [0, max_value]
     [[nodiscard]] SizeType uniform_index(SizeType max_value) const noexcept {
-        auto& rng = get_thread_rng(m_base_seed);
+        auto& rng = get_thread_rng();
 
         // Lemire's fast bounded random
         const uint64_t range = static_cast<uint64_t>(max_value) + 1ULL;
@@ -299,7 +304,14 @@ private:
     static constexpr uint64_t kSplitMix1 = 0xbf58476d1ce4e5b9ULL;
     static constexpr uint64_t kSplitMix2 = 0x94d049bb133111ebULL;
 
+    // Monotonic id per constructed generator; used so that each generator
+    // instance restarts the per-thread streams from its own base seed
+    // (thread_local state would otherwise persist across instances and make a
+    // second, identically seeded generator produce different numbers).
+    static inline std::atomic<uint64_t> s_instance_counter{0};
+
     uint64_t m_base_seed;
+    uint64_t m_instance_id;
 
     /**
      * @brief Initializes the lookup table with quantiles of N(0,1).
@@ -342,19 +354,20 @@ private:
      * @param base_seed Base seed for deriving thread-specific seed
      * @return Reference to thread-local PCG32 generator
      */
-    [[nodiscard]] static PCG32& get_thread_rng(uint64_t base_seed) noexcept {
+    [[nodiscard]] PCG32& get_thread_rng() const noexcept {
         thread_local PCG32 rng;
-        thread_local bool initialized = false;
+        thread_local uint64_t initialized_instance =
+            std::numeric_limits<uint64_t>::max();
 
-        if (!initialized) {
+        if (initialized_instance != m_instance_id) {
             // Derive unique seed for this thread
             const auto tid = static_cast<uint64_t>(omp_get_thread_num());
             const uint64_t thread_seed =
-                splitmix64(base_seed ^ (tid * kSeedMix1));
+                splitmix64(m_base_seed ^ (tid * kSeedMix1));
             const uint64_t stream = splitmix64(thread_seed ^ kSeedMix2);
 
-            rng         = PCG32(thread_seed, stream);
-            initialized = true;
+            rng                  = PCG32(thread_seed, stream);
+            initialized_instance = m_instance_id;
         }
         return rng;
     }
@@ -365,7 +378,7 @@ private:
                        float mean,
                        float stddev) const noexcept {
         // Get thread-local RNG
-        auto& rng = get_thread_rng(m_base_seed);
+        auto& rng = get_thread_rng();
 
         // Maximum valid index for interpolation (we need idx+1 to exist)
         const auto max_idx = static_cast<float>(s_lut.size() - 2);
