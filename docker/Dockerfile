@@ -30,6 +30,12 @@
 #   # context MUST be the repo root:
 #   docker build -t vishnubk/loki -f docker/Dockerfile .
 #
+#   # ALWAYS stamp the git revision so the image records what it was built from
+#   # (ends up in the OCI "revision" label, /software/loki/VERSION and
+#   # loki.__commit__):
+#   docker build --build-arg GIT_COMMIT=$(git rev-parse HEAD) \
+#         -t vishnubk/loki -f docker/Dockerfile .
+#
 # Convert for HPC (Apptainer/Singularity)
 # ---------------------------------------
 #   apptainer build loki.sif docker-daemon://vishnubk/loki:latest
@@ -68,6 +74,10 @@ ARG LOKI_MARCH=x86-64-v3
 # cuRANDDx is compiled for a single SM (see cmake/FindMathDX_SM.cmake).
 ARG MATHDX_SM=750
 ARG JOBS=8
+
+# Build provenance: the loki revision this image was built from. Pass it with
+# --build-arg GIT_COMMIT=$(git rev-parse HEAD); left "unknown" otherwise.
+ARG GIT_COMMIT=unknown
 
 # --- System packages ---------------------------------------------------------
 # Ubuntu 24.04 defaults to GCC 13, but loki requires GCC >= 14 for complete
@@ -134,6 +144,19 @@ RUN git clone https://github.com/vishnubk/peasoup.git /software/peasoup && \
     sed -i 's|std::string login = getpwuid(getuid())->pw_name;|struct passwd* pw_ent = getpwuid(getuid()); std::string login = pw_ent ? pw_ent->pw_name : "unknown";|' include/data_types/timeseries.hpp && \
     grep -q "pw_ent" include/data_types/timeseries.hpp && \
     sed -i 's/ -lnvToolsExt//' Makefile && \
+    # The .inf writer patches: peasoup's PRESTO-format .inf writer has two
+    # cosmetic-but-consequential bugs that make PRESTO's (picky) .inf parser
+    # choke or misread values. Fix the unit label typo "(Mhz)" -> "(MHz)" on
+    # all three header lines, and fix "Channel bandwidth" to report the
+    # per-channel bandwidth (abs(bw)/hdr.nchans) instead of the total
+    # bandwidth (abs(bw)) it was mistakenly reusing from the line above.
+    sed -i 's|Central freq of low channel (Mhz)|Central freq of low channel (MHz)|' include/data_types/timeseries.hpp && \
+    grep -q "Central freq of low channel (MHz)" include/data_types/timeseries.hpp && \
+    sed -i 's|Total bandwidth (Mhz)|Total bandwidth (MHz)|' include/data_types/timeseries.hpp && \
+    grep -q "Total bandwidth (MHz)" include/data_types/timeseries.hpp && \
+    sed -i 's|Channel bandwidth (Mhz)\(.*\)abs(bw)|Channel bandwidth (MHz)\1abs(bw)/hdr.nchans|' include/data_types/timeseries.hpp && \
+    grep -q "Channel bandwidth (MHz)" include/data_types/timeseries.hpp && \
+    grep -q "abs(bw)/hdr.nchans" include/data_types/timeseries.hpp && \
     make -j${JOBS} GPU_ARCH_FLAG="${GPU_ARCH_FLAG}" UCFLAGS="" && \
     make install GPU_ARCH_FLAG="${GPU_ARCH_FLAG}" UCFLAGS=""
 
@@ -154,6 +177,9 @@ ENV CMAKE_BUILD_PARALLEL_LEVEL=${JOBS}
 
 # Build context is the repo ROOT (see .dockerignore).
 COPY . /software/loki
+
+# Stamp the revision into the shipped source tree.
+RUN echo "${GIT_COMMIT}" > /software/loki/VERSION
 
 # CPM downloads C++ dependencies (fmt, spdlog, xsimd, HighFive, BoostMath,
 # toml++, CLI11, thread-pool) from GitHub and MathDX from developer.nvidia.com
@@ -193,8 +219,12 @@ ENV MPLCONFIGDIR=/tmp/matplotlib \
     XDG_CACHE_HOME=/tmp/cache \
     HDF5_USE_FILE_LOCKING=FALSE
 
+# Exposed at runtime as loki.__commit__.
+ENV LOKI_GIT_COMMIT=${GIT_COMMIT}
+
 LABEL org.opencontainers.image.source="https://github.com/vishnubk/loki" \
-      org.opencontainers.image.description="LOKI Extreme Pruning pulsar search (CUDA) with pyloki, inception, dedisp and peasoup"
+      org.opencontainers.image.description="LOKI Extreme Pruning pulsar search (CUDA) with pyloki, inception, dedisp and peasoup" \
+      org.opencontainers.image.revision="${GIT_COMMIT}"
 
 WORKDIR /data
 
