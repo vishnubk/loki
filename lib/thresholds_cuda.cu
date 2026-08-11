@@ -419,6 +419,53 @@ __global__ __launch_bounds__(256, 4) void score_threshold_kernel(
     survive_flags[tid] = grid_scores[score_offset] > threshold ? 1u : 0u;
 }
 
+// Deterministic transition decision.
+//
+// Determinism contract
+// --------------------
+// Many work items (one CUDA block each) can target the SAME output grid cell
+// (stage_offset_cur + ithres_abs * nprobs + iprob). The winner used to be
+// decided by a strict `<` on complexity_cumul, so when two candidates tied
+// exactly the winner was simply whichever block happened to grab the spin-lock
+// first -> run-to-run divergence even with a fixed RNG seed (the diverging
+// states were bit-identical except for the backtracking field threshold_prev).
+//
+// Fix (1): total order on (complexity_cumul, global work index).
+//   Secondary key = `work_idx_base + work_idx`, the index of the work item
+//   inside the current stage. It is unique per candidate by construction
+//   (work items are written at distinct, scan-determined slots) and is a stable
+//   function of the host-side enumeration order
+//   (islot -> neighbour jthres -> kprob), which is exactly the order in which
+//   the OpenMP CPU implementation visits candidates. So "smallest work index
+//   wins a tie" reproduces the CPU's "first candidate seen wins a tie"
+//   semantics as well as being arrival-order independent. Batches are launched
+//   back-to-back on one stream, so a later batch can still legitimately beat an
+//   earlier one only on a strictly smaller complexity_cumul.
+//
+//   Both components are packed into one 64-bit word per grid cell,
+//   `state_winner_keys` (parallel to `states`):
+//       key = (bit_cast<uint32>(complexity_cumul) << 32) | work_index
+//   complexity_cumul is a sum of non-negative terms, and for non-negative
+//   IEEE-754 floats the bit pattern read as uint32 is monotonically increasing
+//   in the value (+inf == 0x7F800000 included), so comparing packed keys with
+//   `<` is exactly "smaller complexity_cumul, ties by smaller work index".
+//   kUnclaimedWinnerKey (all ones) marks an unclaimed cell and loses to every
+//   real key, which is the old `is_empty` branch.
+//   The word is read/written through a volatile pointer: it is the only piece
+//   of state exchanged between blocks inside this kernel, and volatile 64-bit
+//   accesses bypass the (non-coherent) per-SM L1 so a block that acquires the
+//   lock always observes the previous holder's key.
+//
+// Fix (2): the survivor fold copy is now performed INSIDE the critical section.
+//   Previously the copy ran after __syncthreads() with the lock already
+//   released, so a losing-then-winning pair of blocks could interleave their
+//   writes into the same pool slot (both a determinism leak and a genuine data
+//   race: the surviving folds could end up a mixture of two candidates while
+//   ntrials_next described only one of them). Thread 0 now holds the lock
+//   across the whole block-wide copy, so state, ntrials_next and folds_next for
+//   a cell are always mutually consistent and the final content is exactly that
+//   of the unique winner. This kernel runs once per search (thresholds are
+//   precomputed), so the extra serialisation is not on any hot path.
 __global__ void
 transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
                            uint32_t batch_size,
@@ -428,6 +475,7 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
                            float* __restrict__ folds_next,
                            uint32_t* __restrict__ ntrials_next,
                            State* __restrict__ states,
+                           volatile unsigned long long* state_winner_keys,
                            int* __restrict__ locks,
                            const float* __restrict__ thresholds,
                            const float* __restrict__ probs,
@@ -437,6 +485,7 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
                            float nbranches,
                            uint32_t stage_offset_prev,
                            uint32_t stage_offset_cur,
+                           uint32_t work_idx_base,
                            bool source_is_grid) {
     const uint32_t work_idx     = blockIdx.x + (blockIdx.y * gridDim.x);
     const uint32_t tid_in_block = threadIdx.x;
@@ -445,12 +494,13 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
     }
     __shared__ bool should_update;
     __shared__ bool use_grid_source;
+    __shared__ int lock_idx_shared;
     __shared__ uint32_t count_h0, count_h1;
     __shared__ uint32_t base_h0, base_h1;
     __shared__ uint32_t grid_offset_h0, grid_offset_h1;
     __shared__ TransitionWorkItem item_shared;
 
-    // Thread 0: Decision logic
+    // Thread 0: Decision logic (executed while holding the cell lock)
     if (tid_in_block == 0) {
         item_shared                    = work_items[work_idx];
         use_grid_source                = source_is_grid;
@@ -479,18 +529,27 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
         const int iprob =
             find_bin_index_device(probs, nprobs, state_next.success_h1_cumul);
 
-        should_update = false;
+        should_update   = false;
+        lock_idx_shared = -1;
         if (iprob >= 0 && iprob < static_cast<int>(nprobs)) {
             const int state_idx_out =
                 stage_offset_cur + (item.ithres_abs * nprobs) + iprob;
+            // Total order key: (complexity_cumul asc, work index asc), packed
+            // into 64 bits. See the comment above the kernel.
+            const unsigned long long my_key =
+                (static_cast<unsigned long long>(
+                     __float_as_uint(state_next.complexity_cumul))
+                 << 32) |
+                static_cast<unsigned long long>(work_idx_base + work_idx);
             // Lock grid cell
             while (atomicCAS(&locks[state_idx_out], 0, 1) != 0)
                 ;
-            State& existing_state = states[state_idx_out];
-            if (existing_state.is_empty || (state_next.complexity_cumul <
-                                            existing_state.complexity_cumul)) {
-                existing_state = state_next;
-                should_update  = true;
+            __threadfence(); // acquire: see the previous holder's writes
+            lock_idx_shared = state_idx_out;
+            if (my_key < state_winner_keys[state_idx_out]) {
+                states[state_idx_out]            = state_next;
+                state_winner_keys[state_idx_out] = my_key;
+                should_update                    = true;
                 grid_offset_h0 = compute_pool_grid_offset(
                     item.islot_cur, iprob, 0, nprobs, ntrials, nbins_padded);
                 grid_offset_h1 = compute_pool_grid_offset(
@@ -502,13 +561,13 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
                 ntrials_next[ntrials_offset_h0] = count_h0;
                 ntrials_next[ntrials_offset_h1] = count_h1;
             }
-            // Unlock
-            atomicExch(&locks[state_idx_out], 0);
+            // NOTE: the lock stays held until after the fold copy below.
         }
     }
     __syncthreads();
 
-    // All threads: Cooperative sparse-to-dense copy
+    // All threads: Cooperative sparse-to-dense copy, still under the cell lock
+    // so that the folds written always belong to the state currently stored.
 
     if (should_update) {
         const uint32_t vec_count = nbins_padded / 4;
@@ -565,6 +624,13 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
                 }
             }
         }
+    }
+
+    // Release the cell lock only after every thread has finished copying.
+    __syncthreads();
+    if (tid_in_block == 0 && lock_idx_shared >= 0) {
+        __threadfence(); // release: publish state + counts + folds
+        atomicExch(&locks[lock_idx_shared], 0);
     }
 }
 
@@ -728,6 +794,7 @@ void transition_decision_launcher_cuda(const TransitionWorkItem* work_items,
                                        float* folds_next,
                                        uint32_t* ntrials_next,
                                        State* states,
+                                       unsigned long long* state_winner_keys,
                                        int* locks,
                                        const float* thresholds,
                                        const float* probs,
@@ -737,6 +804,7 @@ void transition_decision_launcher_cuda(const TransitionWorkItem* work_items,
                                        float nbranches,
                                        uint32_t stage_offset_prev,
                                        uint32_t stage_offset_cur,
+                                       uint32_t work_idx_base,
                                        bool source_is_grid,
                                        cudaStream_t stream) {
     constexpr SizeType kThreadsPerBlock = 256;
@@ -745,9 +813,9 @@ void transition_decision_launcher_cuda(const TransitionWorkItem* work_items,
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     transition_decision_kernel<<<grid_dim, block_dim, 0, stream>>>(
         work_items, batch_size, folds_source, scan_indices, survive_flags,
-        folds_next, ntrials_next, states, locks, thresholds, probs, ntrials,
-        nbins_padded, nprobs, nbranches, stage_offset_prev, stage_offset_cur,
-        source_is_grid);
+        folds_next, ntrials_next, states, state_winner_keys, locks, thresholds,
+        probs, ntrials, nbins_padded, nprobs, nbranches, stage_offset_prev,
+        stage_offset_cur, work_idx_base, source_is_grid);
     cuda_utils::check_last_cuda_error("transition_decision_kernel");
 }
 
@@ -914,6 +982,11 @@ void pre_simulate_parents_cuda(const TransitionWorkItem* parent_items_d,
     cumulative_rng_offset += num_batches * total_work_max;
 }
 
+// Sentinel for "this grid cell has no winner yet". Any real packed key
+// (complexity_cumul bits : work index) compares smaller, so an unclaimed cell
+// is always claimable.
+constexpr unsigned long long kUnclaimedWinnerKey = ~0ULL;
+
 // Create a compound type for State
 HighFive::CompoundType create_compound_state() {
     return {{"success_h0", HighFive::create_datatype<float>()},
@@ -1022,6 +1095,9 @@ public:
         const auto grid_size = m_nstages * m_nthresholds * m_nprobs;
         m_states.resize(grid_size, State{});
         m_states_locks_d.resize(grid_size, 0);
+        // Deterministic tie-break bookkeeping: work index of the candidate that
+        // currently owns each grid cell (kUnclaimedWinnerKey == unclaimed).
+        m_state_winner_keys_d.resize(grid_size, kUnclaimedWinnerKey);
         m_states_d = m_states;
 
         const SizeType n_batch_trials = m_batch_size * 2 * m_ntrials;
@@ -1079,6 +1155,11 @@ public:
         cudaStream_t stream = nullptr;
         cuda_utils::check_cuda_call(cudaStreamCreate(&stream),
                                     "cudaStreamCreate failed");
+
+        // Tie-break bookkeeping is per-run: no cell is claimed yet.
+        thrust::fill(thrust::cuda::par.on(stream),
+                     m_state_winner_keys_d.begin(), m_state_winner_keys_d.end(),
+                     kUnclaimedWinnerKey);
 
         float var_in = var_init;
         if (m_mode == DynamicThresholdMode::kImproved) {
@@ -1205,6 +1286,7 @@ private:
     thrust::device_vector<float> m_probs_d;
     thrust::device_vector<uint32_t> m_box_score_widths_d;
     thrust::device_vector<State> m_states_d;
+    thrust::device_vector<unsigned long long> m_state_winner_keys_d;
     thrust::device_vector<int> m_states_locks_d;
 
     // Persistent Grid Storage (ping-pong between stages)
@@ -1329,10 +1411,11 @@ private:
             thrust::raw_pointer_cast(m_folds_next_d.data()),
             thrust::raw_pointer_cast(m_ntrials_next_d.data()),
             thrust::raw_pointer_cast(m_states_d.data()),
+            thrust::raw_pointer_cast(m_state_winner_keys_d.data()),
             thrust::raw_pointer_cast(m_states_locks_d.data()),
             thrust::raw_pointer_cast(m_thresholds_d.data()),
             thrust::raw_pointer_cast(m_probs_d.data()), m_ntrials,
-            m_nbins_padded, m_nprobs, nbranches, dummy_stage_offset_prev, 0,
+            m_nbins_padded, m_nprobs, nbranches, dummy_stage_offset_prev, 0, 0u,
             false, stream);
         cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                     "cudaStreamSynchronize failed");
@@ -1422,10 +1505,11 @@ private:
             thrust::raw_pointer_cast(m_folds_next_d.data()),
             thrust::raw_pointer_cast(m_ntrials_next_d.data()),
             thrust::raw_pointer_cast(m_states_d.data()),
+            thrust::raw_pointer_cast(m_state_winner_keys_d.data()),
             thrust::raw_pointer_cast(m_states_locks_d.data()),
             thrust::raw_pointer_cast(m_thresholds_d.data()),
             thrust::raw_pointer_cast(m_probs_d.data()), m_ntrials,
-            m_nbins_padded, m_nprobs, nbranches, dummy_stage_offset_prev, 0,
+            m_nbins_padded, m_nprobs, nbranches, dummy_stage_offset_prev, 0, 0u,
             true, stream);
         cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                     "cudaStreamSynchronize failed");
@@ -1575,11 +1659,13 @@ private:
                 thrust::raw_pointer_cast(m_folds_next_d.data()),
                 thrust::raw_pointer_cast(m_ntrials_next_d.data()),
                 thrust::raw_pointer_cast(m_states_d.data()),
+                thrust::raw_pointer_cast(m_state_winner_keys_d.data()),
                 thrust::raw_pointer_cast(m_states_locks_d.data()),
                 thrust::raw_pointer_cast(m_thresholds_d.data()),
                 thrust::raw_pointer_cast(m_probs_d.data()), m_ntrials,
                 m_nbins_padded, m_nprobs, nbranches, stage_offset_prev,
-                stage_offset_cur, source_is_grid, stream);
+                stage_offset_cur, static_cast<uint32_t>(start), source_is_grid,
+                stream);
         }
         cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                     "cudaStreamSynchronize failed");
