@@ -6,6 +6,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -151,6 +152,11 @@ public:
     }
     [[nodiscard]] SizeType get_nstages() const;
     [[nodiscard]] std::optional<PruneStats> get_stats(SizeType level) const;
+    /**
+     * @brief Number of survivors of the last recorded stage that still had a
+     * non-zero surviving population (0 if there was never one).
+     */
+    [[nodiscard]] SizeType get_last_nonzero_survivors() const;
     [[nodiscard]] std::string get_all_summaries() const;
     [[nodiscard]] std::string get_stats_summary() const;
     [[nodiscard]] std::string get_stats_summary_cuda(float duration) const;
@@ -164,6 +170,31 @@ private:
     std::vector<PruneStats> m_stats_list;
     PruneTimerStats m_accumulated_timers;
 };
+
+/**
+ * @brief Classify how a pruning run terminated.
+ *
+ * "completed"                : the run walked all stages (survivors may still
+ *                              be zero at the very last stage).
+ * "extinct_late"             : survivors hit zero, but late enough in the tree
+ *                              to be an expected consequence of the thresholds.
+ * "extinct_early_anomalous"  : survivors hit zero in the first half of the
+ *                              stages while the previous stage still held a
+ *                              healthy population - most likely a
+ *                              threshold/config problem.
+ *
+ * @param extinct           Whether the run stopped because of zero survivors.
+ * @param stages_completed  Number of pruning iterations actually executed.
+ * @param total_stages      Number of iterations a full run would execute.
+ * @param prev_survivors    Survivors of the last stage with a non-zero
+ *                          population (see
+ *                          PruneStatsCollection::get_last_nonzero_survivors).
+ */
+[[nodiscard]] std::string_view
+classify_termination(bool extinct,
+                     SizeType stages_completed,
+                     SizeType total_stages,
+                     SizeType prev_survivors) noexcept;
 
 class FFAResultWriter {
 public:
@@ -230,7 +261,8 @@ public:
                            double total_pruning_gflops,
                            SizeType n_leaves,
                            SizeType n_params,
-                           const PruneStatsCollection& pstats);
+                           const PruneStatsCollection& pstats,
+                           std::string_view termination_status = "completed");
 
 private:
     std::filesystem::path m_filepath;

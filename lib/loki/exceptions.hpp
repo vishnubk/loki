@@ -1,6 +1,7 @@
 #pragma once
 
 #include <concepts>
+#include <cstddef>
 #include <format>
 #include <source_location>
 #include <stdexcept>
@@ -165,6 +166,59 @@ check_range(Index index,
                 ? std::format("Index {} out of range [0, {})", index, size)
                 : std::format("{} (index {} >= size {})", msg, index, size);
         throw DetailedException(composed, loc);
+    }
+}
+
+/**
+ * @brief Signal that a branching step would exceed its output workspace.
+ *
+ * Thrown *before* any out-of-bounds write happens, so the caller can recover
+ * (the batched prune drivers catch this and retry with a halved batch).
+ * Deliberately a std::overflow_error (not DetailedException) so that the
+ * recovery path can catch it without also swallowing unrelated failures.
+ */
+[[noreturn]] inline void throw_branch_overflow(std::string_view where,
+                                               std::size_t n_leaves_branched,
+                                               std::size_t capacity,
+                                               std::size_t n_leaves) {
+    throw std::overflow_error(
+        std::format("{}: branching workspace overflow: n_leaves_branched={} > "
+                    "capacity={} (n_leaves={} in input batch); "
+                    "reduce batch or raise branch_max",
+                    where, n_leaves_branched, capacity, n_leaves));
+}
+
+/**
+ * @brief Pre-flight capacity check for a CPU branch step.
+ *
+ * Sums the per-leaf product of the per-dimension child counts and throws
+ * before the write loop runs if the result would not fit.
+ *
+ * @param scratch_counts Per-leaf, per-dimension child counts.
+ * @param params_stride  Stride between leaves inside @p scratch_counts.
+ * @param n_dims         Number of dimensions that contribute to the product.
+ * @param dim_offset     First contributing dimension within a leaf.
+ * @param capacity       Number of output leaves that fit.
+ */
+template <typename CountT>
+inline void check_branch_capacity(std::string_view where,
+                                  const CountT* scratch_counts,
+                                  std::size_t n_leaves,
+                                  std::size_t params_stride,
+                                  std::size_t n_dims,
+                                  std::size_t dim_offset,
+                                  std::size_t capacity) {
+    std::size_t total = 0;
+    for (std::size_t i = 0; i < n_leaves; ++i) {
+        std::size_t prod = 1;
+        for (std::size_t k = 0; k < n_dims; ++k) {
+            prod *= static_cast<std::size_t>(
+                scratch_counts[(i * params_stride) + dim_offset + k]);
+        }
+        total += prod;
+    }
+    if (total > capacity) {
+        throw_branch_overflow(where, total, capacity, n_leaves);
     }
 }
 

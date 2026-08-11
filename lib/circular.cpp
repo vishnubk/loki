@@ -270,6 +270,17 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
             scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
     }
 
+    // Capacity of the output buffers. Checked BEFORE the write loops below:
+    // the old post-hoc check ran after the writes, i.e. after the heap was
+    // already corrupted.
+    const SizeType out_capacity =
+        std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size());
+    // d5 (index 0) does not contribute here; only d4..d1 do.
+    error_check::check_branch_capacity("circ_taylor_branch_batch",
+                                       scratch_counts, n_leaves, kParams,
+                                       /*n_dims=*/4, /*dim_offset=*/1,
+                                       out_capacity);
+
     // Loop 3: Branching d4-d1, write every (d4×d3×d2×d1) combo as a complete
     // output leaf. Ignore n_d5
     SizeType out_leaves = 0;
@@ -359,6 +370,13 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
             shift_bins_ptr[fb + 0] >= (eta - utils::kFloatEps);
         if (!in_hole || !need_branching || n_d5 == 1) [[likely]] {
             continue;
+        }
+
+        // Capacity guard BEFORE appending the (n_d5 - 1) extra children.
+        if ((n_d5 - 1) > (out_capacity - out_leaves)) {
+            error_check::throw_branch_overflow(
+                "circ_taylor_branch_batch (crackle hole expansion)",
+                out_leaves + n_d5 - 1, out_capacity, n_leaves);
         }
 
         const double d5_val_parent = leaves_tree_ptr[origin_lo + 0];

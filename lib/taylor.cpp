@@ -129,6 +129,12 @@ SizeType poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
             scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
     }
 
+    // Bounds check BEFORE the write loop (the loop writes unconditionally).
+    error_check::check_branch_capacity(
+        "poly_taylor_branch_accel_batch", scratch_counts, n_leaves, kParams,
+        /*n_dims=*/kParams, /*dim_offset=*/0,
+        std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size()));
+
     // Fill leaves_origins
     SizeType out_leaves = 0;
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -276,6 +282,12 @@ SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
             2, d1_cur, d1_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
             scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
     }
+
+    // Bounds check BEFORE the write loop (the loop writes unconditionally).
+    error_check::check_branch_capacity(
+        "poly_taylor_branch_jerk_batch", scratch_counts, n_leaves, kParams,
+        /*n_dims=*/kParams, /*dim_offset=*/0,
+        std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size()));
 
     // Fill leaves_origins
     SizeType out_leaves = 0;
@@ -441,6 +453,12 @@ SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
             3, d1_cur, d1_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
             scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
     }
+
+    // Bounds check BEFORE the write loop (the loop writes unconditionally).
+    error_check::check_branch_capacity(
+        "poly_taylor_branch_snap_batch", scratch_counts, n_leaves, kParams,
+        /*n_dims=*/kParams, /*dim_offset=*/0,
+        std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size()));
 
     // Fill leaves_origins
     SizeType out_leaves = 0;

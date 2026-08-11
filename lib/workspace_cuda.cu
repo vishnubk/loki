@@ -336,7 +336,9 @@ CUBScratchArena::CUBScratchArena(SizeType batch_size,
         "cudaMallocAsync cub_temp_storage failed");
     // ---- 3. Allocate device-side output scalars ----------------------------
     cuda_utils::check_cuda_call(
-        cudaMallocAsync(&d_reduce_out, sizeof(uint32_t), stream),
+        // 2 slots: [0] generic reduce/scan output or running counter,
+        // [1] device-visible overflow flag for capacity-guarded kernels.
+        cudaMallocAsync(&d_reduce_out, 2 * sizeof(uint32_t), stream),
         "cudaMallocAsync d_reduce_out failed");
     cuda_utils::check_cuda_call(
         cudaMallocAsync(&d_minmax_out, sizeof(MinMaxFloat), stream),

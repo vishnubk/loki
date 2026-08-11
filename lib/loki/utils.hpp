@@ -150,6 +150,20 @@ std::vector<double> linspace(double start,
                              SizeType num_samples = 50,
                              bool endpoint        = true) noexcept;
 
+/**
+ * @brief Validate the (n_runs, ref_segs) argument pair.
+ *
+ * Exactly one of @p n_runs and @p ref_segs must be provided. When @p n_runs is
+ * given it must lie in `[1, nsegments]`. When @p ref_segs is given it must be
+ * non-empty, contain no duplicates, and every entry must be `< nsegments`.
+ *
+ * @throws std::invalid_argument if any of the above is violated.
+ */
+void validate_ref_segs_args(
+    SizeType nsegments,
+    const std::optional<SizeType>& n_runs,
+    const std::optional<std::vector<SizeType>>& ref_segs);
+
 std::vector<SizeType>
 determine_ref_segs(SizeType nsegments,
                    std::optional<SizeType> n_runs,

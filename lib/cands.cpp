@@ -289,6 +289,36 @@ PruneStatsCollection::get_stats(SizeType level) const {
         m_stats_list, [level](const auto& s) { return s.level == level; });
     return it != m_stats_list.end() ? std::optional{*it} : std::nullopt;
 }
+std::string_view classify_termination(bool extinct,
+                                      SizeType stages_completed,
+                                      SizeType total_stages,
+                                      SizeType prev_survivors) noexcept {
+    // Extinction anywhere in the first half of the tree while the previous
+    // stage still held a healthy population is not explainable by the
+    // thresholds alone.
+    constexpr double kEarlyProgressFrac   = 0.5;
+    constexpr SizeType kHealthyPopulation = 100;
+    if (!extinct) {
+        return "completed";
+    }
+    const double progress =
+        total_stages > 0 ? static_cast<double>(stages_completed) /
+                               static_cast<double>(total_stages)
+                         : 1.0;
+    if (progress < kEarlyProgressFrac && prev_survivors > kHealthyPopulation) {
+        return "extinct_early_anomalous";
+    }
+    return "extinct_late";
+}
+
+SizeType PruneStatsCollection::get_last_nonzero_survivors() const {
+    for (auto it = m_stats_list.rbegin(); it != m_stats_list.rend(); ++it) {
+        if (it->n_leaves_surv > 0) {
+            return it->n_leaves_surv;
+        }
+    }
+    return 0;
+}
 std::string PruneStatsCollection::get_all_summaries() const {
     auto sorted_stats = m_stats_list;
     std::ranges::sort(sorted_stats, {}, &PruneStats::level);
@@ -523,7 +553,8 @@ void PruneResultWriter::write_run_results(
     double total_pruning_gflops,
     SizeType n_leaves,
     SizeType n_params,
-    const PruneStatsCollection& pstats) {
+    const PruneStatsCollection& pstats,
+    std::string_view termination_status) {
     std::lock_guard<std::mutex> lock(m_hdf5_mutex);
 
     HighFive::File file        = open_file();
@@ -535,6 +566,10 @@ void PruneResultWriter::write_run_results(
     HighFive::Group run_group = runs_group.createGroup(std::string(run_name));
 
     run_group.createAttribute("total_pruning_gflops", total_pruning_gflops);
+    // Always present so consumers can distinguish a genuinely empty result
+    // ("completed"/"extinct_late") from an anomalously extinguished tree.
+    run_group.createAttribute("termination_status",
+                              std::string(termination_status));
 
     auto [level_stats, timer_stats] = pstats.get_packed_data();
 

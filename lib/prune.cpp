@@ -6,6 +6,7 @@
 #include <format>
 #include <fstream>
 #include <span>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -109,13 +110,12 @@ public:
 
         initialize(ffa_fold, ref_seg, actual_log_file);
 
+        SizeType iterations_completed = 0;
         for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
             execute_iteration(ffa_fold, actual_log_file);
+            iterations_completed = iter + 1;
             // Check for early termination (no survivors)
             if (m_prune_complete) {
-                spdlog::info(
-                    "Pruning terminated early at iteration {} - no survivors",
-                    iter + 1);
                 break;
             }
             // Should we reintegrate survivors at this level?
@@ -131,6 +131,23 @@ public:
             }
         }
 
+        // Classify how the run ended so an empty result can be interpreted
+        const auto prev_surv = m_pstats.get_last_nonzero_survivors();
+        const auto termination_status = cands::classify_termination(
+            m_prune_complete, iterations_completed, nsegments - 1, prev_surv);
+        if (termination_status == "extinct_early_anomalous") {
+            spdlog::warn("Pruning run {}: ANOMALOUS early extinction at stage "
+                         "{}/{} (prev stage had {} survivors) - possible "
+                         "threshold/config problem, treat empty result with "
+                         "suspicion",
+                         run_name, iterations_completed, nsegments - 1,
+                         prev_surv);
+        } else if (m_prune_complete) {
+            spdlog::info(
+                "Pruning terminated early at iteration {} - no survivors",
+                iterations_completed);
+        }
+
         // Final ascend if needed
         if (ascend_levels.empty() ||
             std::ranges::find(ascend_levels, m_prune_level) ==
@@ -139,7 +156,7 @@ public:
         }
 
         // Write results (after transforming to middle of the data)
-        report_survivors(actual_result_file, run_name);
+        report_survivors(actual_result_file, run_name, termination_status);
 
         // Final log entries
         std::ofstream final_log(actual_log_file, std::ios::app);
@@ -302,7 +319,8 @@ private:
     }
 
     void report_survivors(const std::filesystem::path& actual_result_file,
-                          std::string_view run_name) {
+                          std::string_view run_name,
+                          std::string_view termination_status) {
         auto& ws            = get_workspace();
         auto& world_tree    = ws.world_tree;
         const auto n_leaves = world_tree.get_size();
@@ -332,7 +350,7 @@ private:
         result_writer.write_run_results(
             run_name, m_snail_scheme.get_data(), leaves_view, scores_view,
             scores_ep_view, total_pruning_gflops, n_leaves, m_cfg.get_nparams(),
-            m_pstats);
+            m_pstats, termination_status);
     }
 
     [[nodiscard]] double compute_total_prune_gflops() const {
@@ -544,14 +562,47 @@ private:
                                 "this_batch_size={}, remaining={}",
                                 total_processed, this_batch_size, remaining));
             }
-            total_processed += current_batch_size;
-
-            // Branch
+            // Branch, with adaptive batch halving on workspace overflow.
+            // The branch implementations bounds-check the total output size
+            // *before* writing anything, so an overflow_error leaves both the
+            // workspace and the unconsumed world-tree data intact.
             timer.start();
-            const auto n_leaves_batch = m_prune_funcs->branch(
-                leaves_tree_span, prune_ws.branched_leaves,
-                prune_ws.branched_indices, coord_cur, coord_prev,
-                current_batch_size, branch_ws);
+            SizeType n_leaves_batch = 0;
+            while (true) {
+                try {
+                    n_leaves_batch = m_prune_funcs->branch(
+                        leaves_tree_span, prune_ws.branched_leaves,
+                        prune_ws.branched_indices, coord_cur, coord_prev,
+                        current_batch_size, branch_ws);
+                    break;
+                } catch (const std::overflow_error& e) {
+                    if (current_batch_size <= 1) {
+                        throw std::overflow_error(std::format(
+                            "{}\nA single leaf already overflows the branching "
+                            "workspace at prune level {}: increase the "
+                            "configuration's branch_max (currently sized for "
+                            "max_branched_leaves={}).",
+                            e.what(), m_prune_level,
+                            prune_ws.max_branched_leaves));
+                    }
+                    const SizeType halved = current_batch_size / 2;
+                    spdlog::warn("Prune level {}: branching workspace overflow "
+                                 "with batch of {} leaves; retrying with {}. "
+                                 "({})",
+                                 m_prune_level, current_batch_size, halved,
+                                 e.what());
+                    auto retry         = world_tree.get_leaves_span(halved);
+                    leaves_tree_span   = retry.first;
+                    current_batch_size = retry.second;
+                    if (current_batch_size == 0) {
+                        throw std::runtime_error(
+                            "Loaded batch size is 0 while retrying after a "
+                            "branching workspace overflow");
+                    }
+                }
+            }
+            // Only the leaves actually branched are consumed below.
+            total_processed += current_batch_size;
             stats.batch_timers["branch"] += timer.stop();
             stats.n_leaves += n_leaves_batch;
             if (n_leaves_batch == 0) {
@@ -664,13 +715,18 @@ public:
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()) {
         // Create branching pattern and branch max
-        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        error_check::check(!m_branching_pattern.empty(),
+                           "Branching pattern is empty (nsegments == 1?): "
+                           "pruning needs bseg_ffa < nsamps");
         const auto branch_max = *std::ranges::max_element(m_branching_pattern);
         m_branch_max =
             std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
 
         // Allocate workspaces
         const auto nsegments = m_ffa_plan.get_nsegments().back();
+        // Fail fast on conflicting/invalid n_runs & ref_segs arguments
+        utils::validate_ref_segs_args(nsegments, m_n_runs, m_ref_segs);
         m_workspace_storage.reserve(m_nthreads);
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
@@ -722,13 +778,18 @@ public:
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()) {
         // Create branching pattern and branch max
-        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        error_check::check(!m_branching_pattern.empty(),
+                           "Branching pattern is empty (nsegments == 1?): "
+                           "pruning needs bseg_ffa < nsamps");
         const auto branch_max = *std::ranges::max_element(m_branching_pattern);
         m_branch_max =
             std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
         // Validate workspaces
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         const auto nsegments   = m_ffa_plan.get_nsegments().back();
+        // Fail fast on conflicting/invalid n_runs & ref_segs arguments
+        utils::validate_ref_segs_args(nsegments, m_n_runs, m_ref_segs);
         error_check::check_greater_equal(
             m_workspaces_view.size(), static_cast<SizeType>(m_nthreads),
             "EPMultiPass: Provided external workspaces is less than requested "

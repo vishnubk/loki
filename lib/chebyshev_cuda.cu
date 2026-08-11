@@ -1,5 +1,6 @@
 #include "loki/core/chebyshev.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cuda/atomic>
 #include <cuda/std/limits>
@@ -12,6 +13,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
+#include "loki/exceptions.hpp"
 #include "loki/kernel_utils.cuh"
 #include "loki/utils.hpp"
 
@@ -1439,6 +1441,11 @@ poly_chebyshev_branch_batch_cuda(cuda::std::span<double> leaves_tree,
                                  cudaStream_t stream) {
     const SizeType leaves_stride = (n_params + 2) * 2;
 
+    // Capacity of the output buffers (smallest span wins).
+    const SizeType out_capacity =
+        std::min({leaves_branch.size() / leaves_stride, leaves_origins.size(),
+                  validation_mask.size()});
+
     // Set validation mask for input leaves
     cuda_utils::check_cuda_call(cudaMemsetAsync(validation_mask.data(), 1,
                                                 n_leaves * sizeof(uint8_t),
@@ -1524,6 +1531,12 @@ poly_chebyshev_branch_batch_cuda(cuda::std::span<double> leaves_tree,
     const SizeType n_leaves_branched = last_offset + last_count;
     if (n_leaves_branched == 0) {
         return n_leaves_branched;
+    }
+    // Bounds check BEFORE anything touches the output buffers.
+    if (n_leaves_branched > out_capacity) {
+        error_check::throw_branch_overflow("poly_chebyshev_branch_batch_cuda",
+                                           n_leaves_branched, out_capacity,
+                                           n_leaves);
     }
 
     // Set validation mask for produced outputs

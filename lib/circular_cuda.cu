@@ -1,5 +1,6 @@
 #include "loki/core/circular.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cuda/atomic>
 #include <cuda/std/limits>
@@ -12,6 +13,7 @@
 #include "loki/common/types.hpp"
 #include "loki/cub_helpers.cuh"
 #include "loki/cuda_utils.cuh"
+#include "loki/exceptions.hpp"
 #include "loki/kernel_utils.cuh"
 #include "loki/utils.hpp"
 
@@ -247,6 +249,8 @@ kernel_expand_crackle_holes(const double* __restrict__ leaves_tree,
                             double eta,
                             double propagator_significance,
                             uint32_t* __restrict__ out_count,
+                            uint32_t capacity,
+                            uint32_t* __restrict__ overflow_flag,
                             memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr uint32_t kParams       = 5;
     constexpr uint32_t kParamStride  = 2;
@@ -299,6 +303,14 @@ kernel_expand_crackle_holes(const double* __restrict__ leaves_tree,
     leaf[0]                   = fma(0.0, d5_sig_actual, first_center);
     const uint32_t extra      = n_d5 - 1;
     const uint32_t tail_start = atomicAdd(out_count, extra);
+
+    // Capacity guard: the reservation above is still counted (so the host
+    // sees the *required* size), but nothing is written past the end. Do not
+    // clamp partially -- the whole batch is discarded and retried smaller.
+    if (tail_start > capacity || (capacity - tail_start) < extra) {
+        atomicOr(overflow_flag, 1U);
+        return;
+    }
 
     for (uint32_t a = 1; a < n_d5; ++a) {
         const uint32_t write_idx = tail_start + a - 1;
@@ -682,9 +694,18 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
                               cudaStream_t stream) {
     constexpr SizeType kLeavesStride = 14;
 
-    // Check if crackle branching is needed (reuse scratch_ws.d_reduce_out)
+    // Capacity of the *output* buffers. Every downstream buffer in the prune
+    // workspace is sized off the same max_branched_leaves, so the smallest of
+    // the spans we are handed is the true bound.
+    const SizeType out_capacity =
+        std::min({leaves_branch.size() / kLeavesStride, leaves_origins.size(),
+                  validation_mask.size()});
+
+    // Check if crackle branching is needed (reuse scratch_ws.d_reduce_out).
+    // Slot 0: has_crackle / running out_count. Slot 1: crackle overflow flag.
     cuda_utils::check_cuda_call(
-        cudaMemsetAsync(scratch_ws.d_reduce_out, 0, sizeof(uint32_t), stream),
+        cudaMemsetAsync(scratch_ws.d_reduce_out, 0, 2 * sizeof(uint32_t),
+                        stream),
         "cudaMemsetAsync failed");
 
     // ---- Kernel 1: analyze + branch enumeration ----
@@ -732,6 +753,12 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
     const SizeType n_leaves_branched = last_offset + last_count;
     if (n_leaves_branched == 0) {
         return n_leaves_branched;
+    }
+    // Bounds check BEFORE anything touches the output buffers.
+    if (n_leaves_branched > out_capacity) {
+        error_check::throw_branch_overflow("circ_taylor_branch_batch_cuda",
+                                           n_leaves_branched, out_capacity,
+                                           n_leaves);
     }
 
     if (n_leaves_branched == n_leaves && has_crackle == 0) {
@@ -786,19 +813,27 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
     kernel_expand_crackle_holes<<<grid_dim_3, block_dim, 0, stream>>>(
         leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
         n_leaves_branched, coord_cur.second, static_cast<double>(nbins), eta,
-        propagator_significance, scratch_ws.d_reduce_out, branch_ws);
+        propagator_significance, scratch_ws.d_reduce_out,
+        static_cast<uint32_t>(out_capacity), scratch_ws.d_reduce_out + 1,
+        branch_ws);
     cuda_utils::check_last_cuda_error("Kernel 3 launch failed");
 
-    // Sync + read back final count
-    uint32_t final_count;
+    // Sync + read back final count and the overflow flag (adjacent slots)
+    uint32_t counters[2];
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&final_count, scratch_ws.d_reduce_out, sizeof(uint32_t),
-                        cudaMemcpyDeviceToHost, stream),
+        cudaMemcpyAsync(counters, scratch_ws.d_reduce_out,
+                        2 * sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
 
     // Unavoidable sync
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "cudaStreamSynchronize kernel 3 failed");
+    const uint32_t final_count = counters[0];
+    if (counters[1] != 0U || final_count > out_capacity) {
+        error_check::throw_branch_overflow(
+            "circ_taylor_branch_batch_cuda (crackle hole expansion)",
+            final_count, out_capacity, n_leaves);
+    }
 
     // Set validation mask for produced outputs
     cuda_utils::check_cuda_call(cudaMemsetAsync(validation_mask.data(), 1,

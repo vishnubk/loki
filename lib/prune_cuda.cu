@@ -29,6 +29,16 @@ namespace loki::algorithms {
 
 namespace {
 
+// max_element on an empty branching pattern (nsegments == 1, i.e.
+// bseg_ffa == nsamps) is UB and used to segfault; validate first.
+template <typename T>
+T checked_branch_pattern_max(const std::vector<T>& pattern) {
+    error_check::check(!pattern.empty(),
+                       "Branching pattern is empty (nsegments == 1?): "
+                       "pruning needs bseg_ffa < nsamps");
+    return *std::ranges::max_element(pattern);
+}
+
 struct ExecutionStream {
     cudaStream_t stream{nullptr};
     bool owns{false};
@@ -161,8 +171,19 @@ public:
             }
         }
 
+        // Classify how the run ended so an empty result can be interpreted
+        const auto prev_surv = m_pstats.get_last_nonzero_survivors();
+        const auto termination_status = cands::classify_termination(
+            m_prune_complete, iterations_completed, nsegments - 1, prev_surv);
         // Log early exit ONCE after loop if needed
-        if (m_prune_complete && iterations_completed < nsegments - 1) {
+        if (termination_status == "extinct_early_anomalous") {
+            spdlog::warn("Pruning run {}: ANOMALOUS early extinction at stage "
+                         "{}/{} (prev stage had {} survivors) - possible "
+                         "threshold/config problem, treat empty result with "
+                         "suspicion",
+                         run_name, iterations_completed, nsegments - 1,
+                         prev_surv);
+        } else if (m_prune_complete && iterations_completed < nsegments - 1) {
             spdlog::info(
                 "Pruning terminated early at iteration {} - no survivors",
                 iterations_completed);
@@ -176,7 +197,7 @@ public:
         }
 
         // Write results (after transforming to middle of the data)
-        report_survivors(actual_result_file, run_name);
+        report_survivors(actual_result_file, run_name, termination_status);
 
         // Final log entries
         std::ofstream log(actual_log_file, std::ios::app);
@@ -357,7 +378,8 @@ private:
     }
 
     void report_survivors(const std::filesystem::path& actual_result_file,
-                          std::string_view run_name) {
+                          std::string_view run_name,
+                          std::string_view termination_status) {
         auto& ws         = get_workspace();
         auto& world_tree = ws.world_tree;
 
@@ -445,7 +467,7 @@ private:
         result_writer.write_run_results(
             run_name, m_snail_scheme.get_data(), leaves_report_view,
             scores_report_view, scores_ep_report_view, total_pruning_gflops,
-            n_leaves, m_cfg.get_nparams(), m_pstats);
+            n_leaves, m_cfg.get_nparams(), m_pstats, termination_status);
     }
 
     [[nodiscard]] double compute_total_prune_gflops() const {
@@ -642,16 +664,50 @@ private:
                                 "this_batch_size={}, remaining={}",
                                 total_processed, this_batch_size, remaining));
             }
+            // Branch, with adaptive batch halving on workspace overflow.
+            // The branch wrappers now bounds-check the scanned output size
+            // *before* writing anything, so an overflow_error leaves the
+            // workspace (and the unconsumed world-tree data) untouched and we
+            // can simply retry with fewer input leaves.
+            SizeType n_leaves_batch = 0;
+            while (true) {
+                try {
+                    n_leaves_batch = m_prune_funcs->branch(
+                        leaves_tree_span,
+                        cuda_utils::as_span(prune_ws.branched_leaves_d),
+                        cuda_utils::as_span(prune_ws.branched_indices_d),
+                        cuda_utils::as_span(prune_ws.validation_mask_d),
+                        coord_cur, coord_prev, current_batch_size,
+                        branch_ws_view, scratch_ws, stream);
+                    break;
+                } catch (const std::overflow_error& e) {
+                    if (current_batch_size <= 1) {
+                        throw std::overflow_error(std::format(
+                            "{}\nA single leaf already overflows the branching "
+                            "workspace at prune level {}: increase the "
+                            "configuration's branch_max (currently sized for "
+                            "max_branched_leaves={}).",
+                            e.what(), m_prune_level,
+                            prune_ws.max_branched_leaves));
+                    }
+                    const SizeType halved = current_batch_size / 2;
+                    spdlog::warn("Prune level {}: branching workspace overflow "
+                                 "with batch of {} leaves; retrying with {}. "
+                                 "({})",
+                                 m_prune_level, current_batch_size, halved,
+                                 e.what());
+                    auto retry         = world_tree.get_leaves_span(halved);
+                    leaves_tree_span   = retry.first;
+                    current_batch_size = retry.second;
+                    if (current_batch_size == 0) {
+                        throw std::runtime_error(
+                            "Loaded batch size is 0 while retrying after a "
+                            "branching workspace overflow");
+                    }
+                }
+            }
+            // Only the leaves actually branched are consumed below.
             total_processed += current_batch_size;
-
-            // Branch
-            const auto n_leaves_batch = m_prune_funcs->branch(
-                leaves_tree_span,
-                cuda_utils::as_span(prune_ws.branched_leaves_d),
-                cuda_utils::as_span(prune_ws.branched_indices_d),
-                cuda_utils::as_span(prune_ws.validation_mask_d), coord_cur,
-                coord_prev, current_batch_size, branch_ws_view, scratch_ws,
-                stream);
             stats.n_leaves += n_leaves_batch;
             if (n_leaves_batch == 0) {
                 world_tree.consume_read(current_batch_size);
@@ -778,10 +834,10 @@ public:
           m_execution_stream(device_id),
           m_ffa_plan(m_cfg),
           m_branching_pattern(m_ffa_plan.get_branching_pattern(m_poly_basis)),
-          m_branch_max(
-              std::max(static_cast<SizeType>(std::ceil(
-                           *std::ranges::max_element(m_branching_pattern) * 2)),
-                       32UL)),
+          m_branch_max(std::max(
+              static_cast<SizeType>(std::ceil(
+                  checked_branch_pattern_max(m_branching_pattern) * 2)),
+              32UL)),
           m_workspace_storage(m_batch_size,
                               m_branch_max,
                               m_max_sugg,
@@ -800,6 +856,8 @@ public:
                                      ? m_cfg.get_nbins_f()
                                      : m_cfg.get_nbins();
         const auto& ws         = get_workspace();
+        // Fail fast on conflicting/invalid n_runs & ref_segs arguments
+        utils::validate_ref_segs_args(nsegments, m_n_runs, m_ref_segs);
         ws.validate(m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
                     m_cfg.get_nparams(), nbins, nsegments);
     }
@@ -829,8 +887,9 @@ public:
           m_workspace_storage(),
           m_workspace_ptr(&workspace) {
         // Create branching pattern and branch max
-        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
-        const auto branch_max = *std::ranges::max_element(m_branching_pattern);
+        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        const auto branch_max =
+            checked_branch_pattern_max(m_branching_pattern);
         m_branch_max =
             std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
 
@@ -841,6 +900,8 @@ public:
         const SizeType nbins   = std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>
                                      ? m_cfg.get_nbins_f()
                                      : m_cfg.get_nbins();
+        // Fail fast on conflicting/invalid n_runs & ref_segs arguments
+        utils::validate_ref_segs_args(nsegments, m_n_runs, m_ref_segs);
         ws.validate(m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
                     m_cfg.get_nparams(), nbins, nsegments);
     }

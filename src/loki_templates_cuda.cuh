@@ -52,6 +52,9 @@ void bind_ffa_cuda_class(py::module& m, const std::string& name) {
 // Template function to bind EPMultiPassCUDA<T>
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void bind_ep_multi_pass_cuda_class(py::module& m, const std::string& name) {
+    // Note: `n_runs` and `ref_segs` are mutually exclusive; provide exactly
+    // one of them. `ref_segs` must be non-empty, duplicate-free, and every
+    // entry must be < nsegments.
     auto cls =
         py::class_<EPMultiPassCUDA<FoldTypeCUDA>>(m, name.c_str())
             .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,

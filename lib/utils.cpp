@@ -19,6 +19,49 @@ SizeType round_div(SizeType num, SizeType den) {
 }
 } // namespace
 
+void validate_ref_segs_args(
+    SizeType nsegments,
+    const std::optional<SizeType>& n_runs,
+    const std::optional<std::vector<SizeType>>& ref_segs) {
+    if (n_runs.has_value() && ref_segs.has_value()) {
+        throw std::invalid_argument(
+            "provide either n_runs or ref_segs, not both");
+    }
+    if (!n_runs.has_value() && !ref_segs.has_value()) {
+        throw std::invalid_argument(
+            "Either n_runs or ref_segs must be provided");
+    }
+    if (n_runs.has_value()) {
+        const auto n_runs_val = n_runs.value();
+        if (n_runs_val < 1 || n_runs_val > nsegments) {
+            throw std::invalid_argument(
+                std::format("n_runs must be between 1 and {}, got {}",
+                            nsegments, n_runs_val));
+        }
+        return;
+    }
+    const auto& ref_segs_val = ref_segs.value();
+    if (ref_segs_val.empty()) {
+        throw std::invalid_argument("ref_segs must not be empty");
+    }
+    std::vector<SizeType> seen;
+    seen.reserve(ref_segs_val.size());
+    for (const auto seg : ref_segs_val) {
+        if (seg >= nsegments) {
+            throw std::invalid_argument(
+                std::format("ref_segs entry {} is out of range: must be < "
+                            "nsegments ({})",
+                            seg, nsegments));
+        }
+        if (std::ranges::find(seen, seg) != seen.end()) {
+            throw std::invalid_argument(std::format(
+                "ref_segs contains duplicate entry {} (nsegments = {})", seg,
+                nsegments));
+        }
+        seen.push_back(seg);
+    }
+}
+
 float diff_max(const float* __restrict__ x,
                const float* __restrict__ y,
                SizeType size) noexcept {
@@ -214,14 +257,9 @@ std::vector<SizeType>
 determine_ref_segs(SizeType nsegments,
                    std::optional<SizeType> n_runs,
                    std::optional<std::vector<SizeType>> ref_segs) {
+    validate_ref_segs_args(nsegments, n_runs, ref_segs);
     if (n_runs.has_value()) {
-        // n_runs takes precedence over ref_segs
         const auto n_runs_val = n_runs.value();
-        if (n_runs_val < 1 || n_runs_val > nsegments) {
-            throw std::runtime_error(
-                std::format("n_runs must be between 1 and {}, got {}",
-                            nsegments, n_runs_val));
-        }
         std::vector<SizeType> ref_segs_val(n_runs_val);
         if (n_runs_val == 1) {
             ref_segs_val[0] = 0;
@@ -234,24 +272,16 @@ determine_ref_segs(SizeType nsegments,
         }
         return ref_segs_val;
     }
-    if (ref_segs.has_value()) {
-        return ref_segs.value();
-    }
-    throw std::runtime_error("Either n_runs or ref_segs must be provided");
+    return ref_segs.value();
 }
 
 std::vector<SizeType>
 determine_ref_segs_pareto(SizeType nsegments,
                           std::optional<SizeType> n_runs,
                           std::optional<std::vector<SizeType>> ref_segs) {
+    validate_ref_segs_args(nsegments, n_runs, ref_segs);
     if (n_runs.has_value()) {
-        // n_runs takes precedence over ref_segs
         const auto n_runs_val = n_runs.value();
-        if (n_runs_val < 1 || n_runs_val > nsegments) {
-            throw std::runtime_error(
-                std::format("n_runs must be between 1 and {}, got {}",
-                            nsegments, n_runs_val));
-        }
         // Special case: single anchor → center
         if (n_runs_val == 1) {
             return {nsegments / 2};
@@ -271,10 +301,7 @@ determine_ref_segs_pareto(SizeType nsegments,
         }
         return result;
     }
-    if (ref_segs.has_value()) {
-        return ref_segs.value();
-    }
-    throw std::runtime_error("Either n_runs or ref_segs must be provided");
+    return ref_segs.value();
 }
 
 } // namespace loki::utils

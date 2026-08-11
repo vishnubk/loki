@@ -1,5 +1,6 @@
 #include "loki/core/taylor.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cuda/atomic>
 #include <cuda/std/limits>
@@ -12,6 +13,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
+#include "loki/exceptions.hpp"
 #include "loki/kernel_utils.cuh"
 #include "loki/utils.hpp"
 
@@ -1099,6 +1101,11 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
     static_assert(NPARAMS >= 2 && NPARAMS <= 4);
     constexpr SizeType kLeavesStride = (NPARAMS + 2) * 2;
 
+    // Capacity of the output buffers (smallest span wins).
+    const SizeType out_capacity =
+        std::min({leaves_branch.size() / kLeavesStride, leaves_origins.size(),
+                  validation_mask.size()});
+
     // ---- Kernel 1: analyze + branch enumeration ----
     constexpr SizeType kThreadsPerBlock = 256;
     const auto blocks_per_grid =
@@ -1146,6 +1153,12 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
     const SizeType n_leaves_branched = last_offset + last_count;
     if (n_leaves_branched == 0) {
         return n_leaves_branched;
+    }
+    // Bounds check BEFORE anything touches the output buffers.
+    if (n_leaves_branched > out_capacity) {
+        error_check::throw_branch_overflow("poly_taylor_branch_impl_cuda",
+                                           n_leaves_branched, out_capacity,
+                                           n_leaves);
     }
 
     // Set validation mask for produced outputs
