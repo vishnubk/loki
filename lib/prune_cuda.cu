@@ -285,11 +285,15 @@ private:
             std::max(SizeType{1}, std::min(m_batch_size, n_survivors));
         const auto n_segments_so_far = idx_segments.size();
 
-        // Copy the segment coordinates to the device
-        thrust::copy(thrust::cuda::par.on(stream), idx_segments.begin(),
-                     idx_segments.end(), ws.idx_segments_d.begin());
-        thrust::copy(thrust::cuda::par.on(stream), coord_segments.begin(),
-                     coord_segments.end(), ws.coord_segments_d.begin());
+        // Copy the segment coordinates to the device. No execution policy
+        // here: an explicit device policy makes thrust treat the host source
+        // as device memory (device copy-kernel dereferences host pointers ->
+        // cudaErrorIllegalAddress); cross-system dispatch does a proper H->D
+        // copy and synchronizes before the host vectors go out of scope.
+        thrust::copy(idx_segments.begin(), idx_segments.end(),
+                     ws.idx_segments_d.begin());
+        thrust::copy(coord_segments.begin(), coord_segments.end(),
+                     ws.coord_segments_d.begin());
 
         memory::CircularViewCUDA<double> leaves_cv =
             world_tree.get_leaves_circular_view();

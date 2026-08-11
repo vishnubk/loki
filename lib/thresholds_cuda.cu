@@ -1112,9 +1112,11 @@ public:
             }
         }
         bar.mark_as_completed();
-        // Copy final states back to host
-        thrust::copy(thrust::cuda::par.on(stream), m_states_d.begin(),
-                     m_states_d.end(), m_states.begin());
+        // Copy final states back to host. No execution policy here: an
+        // explicit device policy makes thrust treat the host destination as
+        // device memory (fails with cudaErrorInvalidValue on CCCL >= 12.9);
+        // cross-system dispatch handles D->H correctly and synchronizes.
+        thrust::copy(m_states_d.begin(), m_states_d.end(), m_states.begin());
         cuda_utils::check_cuda_call(cudaStreamDestroy(stream),
                                     "cudaStreamDestroy failed");
     }

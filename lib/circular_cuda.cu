@@ -68,7 +68,7 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
                                    double eta,
                                    uint32_t branch_max,
                                    memory::BranchingWorkspaceCUDAView branch_ws,
-                                   memory::CUBScratchArena& scratch_ws) {
+                                   uint32_t* __restrict__ d_reduce_out) {
     constexpr SizeType kParams       = 5;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -152,7 +152,7 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
 
     branch_ws.leaf_branch_count[ileaf] = c1 * c2 * c3 * c4;
     if (shift_d5 >= (eta - utils::kFloatEps)) {
-        atomicOr(scratch_ws.d_reduce_out, 1U);
+        atomicOr(d_reduce_out, 1U);
     }
 }
 
@@ -695,9 +695,13 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
 
+    // Pass the device pointer, not the host-side arena: reference parameters
+    // on __global__ kernels smuggle a host address onto the device (works
+    // only on HMM-capable systems, illegal address everywhere else).
     kernel_analyze_and_branch_circular<<<grid_dim, block_dim, 0, stream>>>(
         leaves_tree.data(), n_leaves, coord_cur.second,
-        static_cast<double>(nbins), eta, branch_max, branch_ws, scratch_ws);
+        static_cast<double>(nbins), eta, branch_max, branch_ws,
+        scratch_ws.d_reduce_out);
     cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
 
     // compute output size and offsets (leaf_output_offset)
