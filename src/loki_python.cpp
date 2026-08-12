@@ -180,7 +180,7 @@ PYBIND11_MODULE(libloki, m) {
              }),
              py::arg("branching_pattern"), py::arg("ref_ducy"),
              py::arg("nbins") = 64, py::arg("ntrials") = 1024,
-             py::arg("nprobs") = 10, py::arg("prob_min") = 0.05F,
+             py::arg("nprobs") = 24, py::arg("prob_min") = 0.001F,
              py::arg("snr_final") = 8.0F, py::arg("nthresholds") = 100,
              py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
              py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
