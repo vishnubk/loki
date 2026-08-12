@@ -1,5 +1,7 @@
 #include "loki/core/dynamic.hpp"
 
+#include <algorithm>
+
 #include <cuda/std/limits>
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
@@ -67,7 +69,11 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::BasePruneDPFunctsCUDA(
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         m_irfft_executor =
             std::make_unique<math::IrfftExecutorCUDA>(m_cfg.get_nbins());
-        const auto max_batch_size = m_batch_size * m_branch_max;
+        // The seed stage irfft-transforms the ENTIRE initial coordinate grid
+        // in one call, which can exceed the per-level branching capacity
+        // (batch_size * branch_max) for large nsamps / wide frequency shards.
+        const auto max_batch_size =
+            std::max(m_batch_size * m_branch_max, n_coords_init);
         m_scratch_folds_d.resize(max_batch_size * 2 * m_cfg.get_nbins());
     } else {
         m_scratch_folds_d.resize(1); // Not needed for float
@@ -145,6 +151,9 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
         // Ensure exact span for irfft transform
         const auto nfft = 2 * n_leaves;
         auto folds_span = folds_tree.first(nfft * nbins_f);
+        error_check::check_greater_equal(
+            m_scratch_folds_d.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for score irfft");
         auto folds_t_span =
             cuda_utils::as_span(m_scratch_folds_d).first(nfft * nbins);
         m_irfft_executor->execute(folds_span, folds_t_span,
@@ -196,6 +205,9 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
         const auto nfft = 2 * this->m_n_coords_init;
         error_check::check_equal(fold_segment.size(), nfft * nbins_f,
                                  "fold_segment size mismatch");
+        error_check::check_greater_equal(
+            this->m_scratch_folds_d.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for seed irfft");
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
         this->m_irfft_executor->execute(fold_segment, folds_t_span,
@@ -240,6 +252,9 @@ void BaseChebyshevPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
         const auto nfft = 2 * this->m_n_coords_init;
         error_check::check_equal(fold_segment.size(), nfft * nbins_f,
                                  "fold_segment size mismatch");
+        error_check::check_greater_equal(
+            this->m_scratch_folds_d.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for seed irfft");
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
         this->m_irfft_executor->execute(fold_segment, folds_t_span,
@@ -372,6 +387,9 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             n_coords_init, n_leaves, n_segments, stream);
         const auto nfft = 2 * n_leaves;
+        error_check::check_greater_equal(
+            this->m_scratch_folds_d.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for ascend irfft");
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
         this->m_irfft_executor->execute(folds_tree, folds_t_span,
@@ -525,6 +543,9 @@ void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::ascend(
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             n_coords_init, n_leaves, n_segments, stream);
         const auto nfft = 2 * n_leaves;
+        error_check::check_greater_equal(
+            this->m_scratch_folds_d.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for ascend irfft");
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
         this->m_irfft_executor->execute(folds_tree, folds_t_span,
@@ -694,6 +715,9 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             n_coords_init, n_leaves, n_segments, stream);
         const auto nfft = 2 * n_leaves;
+        error_check::check_greater_equal(
+            this->m_scratch_folds_d.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for ascend irfft");
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
         this->m_irfft_executor->execute(folds_tree, folds_t_span,

@@ -47,7 +47,11 @@ BasePruneDPFuncts<FoldType, Derived>::BasePruneDPFuncts(
         m_irfft_executor =
             std::make_unique<math::IrfftExecutor>(m_cfg.get_nbins());
         m_scratch_shifts.resize(1); // Not needed for complex
-        const auto max_batch_size = m_batch_size * m_branch_max;
+        // The seed stage irfft-transforms the ENTIRE initial coordinate grid
+        // in one call, which can exceed the per-level branching capacity
+        // (batch_size * branch_max) for large nsamps / wide frequency shards.
+        const auto max_batch_size =
+            std::max(m_batch_size * m_branch_max, n_coords_init);
         m_scratch_folds.resize(max_batch_size * 2 * m_cfg.get_nbins());
     } else {
         m_scratch_shifts.resize(2 * m_cfg.get_nbins());
@@ -127,6 +131,9 @@ SizeType BasePruneDPFuncts<FoldType, Derived>::score_and_filter(
         // Ensure exact span for irfft transform
         const auto nfft = 2 * n_leaves;
         auto folds_span = folds_tree.first(n_leaves * 2 * nbins_f);
+        error_check::check_greater_equal(
+            m_scratch_folds.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for score irfft");
         auto folds_t_span =
             std::span<float>(m_scratch_folds).first(nfft * nbins);
         m_irfft_executor->execute(folds_span, folds_t_span,
@@ -195,6 +202,9 @@ void BaseTaylorPruneDPFuncts<FoldType, Derived>::seed(
         const auto nbins_f = this->m_cfg.get_nbins_f();
         error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins_f,
                                  "fold_segment size mismatch");
+        error_check::check_greater_equal(
+            this->m_scratch_folds.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for seed irfft");
         auto fold_segment_t =
             std::span<float>(this->m_scratch_folds).first(nfft * nbins);
         this->m_irfft_executor->execute(fold_segment, fold_segment_t,
@@ -238,6 +248,9 @@ void BaseChebyshevPruneDPFuncts<FoldType, Derived>::seed(
         const auto nbins_f = this->m_cfg.get_nbins_f();
         error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins_f,
                                  "fold_segment size mismatch");
+        error_check::check_greater_equal(
+            this->m_scratch_folds.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for seed irfft");
         auto fold_segment_t =
             std::span<float>(this->m_scratch_folds).first(nfft * nbins);
         this->m_irfft_executor->execute(fold_segment, fold_segment_t,
@@ -359,6 +372,9 @@ void PrunePolyTaylorDPFuncts<FoldType>::ascend(
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             n_coords_init, n_leaves, n_segments);
         const auto nfft = 2 * n_leaves;
+        error_check::check_greater_equal(
+            this->m_scratch_folds.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for ascend irfft");
         auto fold_segment_t =
             std::span<float>(this->m_scratch_folds).first(nfft * nbins);
         this->m_irfft_executor->execute(folds_tree, fold_segment_t,
@@ -496,6 +512,9 @@ void PrunePolyChebyshevDPFuncts<FoldType>::ascend(
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             this->m_n_coords_init, n_leaves, n_segments);
         const auto nfft = 2 * n_leaves;
+        error_check::check_greater_equal(
+            this->m_scratch_folds.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for ascend irfft");
         auto fold_segment_t =
             std::span<float>(this->m_scratch_folds).first(nfft * nbins);
         this->m_irfft_executor->execute(folds_tree, fold_segment_t,
@@ -645,6 +664,9 @@ void PruneCircTaylorDPFuncts<FoldType>::ascend(
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             this->m_n_coords_init, n_leaves, n_segments);
         const auto nfft = 2 * n_leaves;
+        error_check::check_greater_equal(
+            this->m_scratch_folds.size(), nfft * nbins,
+            "scratch_folds capacity insufficient for ascend irfft");
         auto fold_segment_t =
             std::span<float>(this->m_scratch_folds).first(nfft * nbins);
         this->m_irfft_executor->execute(folds_tree, fold_segment_t,
