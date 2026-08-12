@@ -32,45 +32,14 @@ void init_fftw_once(int nthreads) {
     });
 }
 
-// RAII cleanup for all FFTW resources on program exit
-struct FFTWGlobalCleanup {
-    bool initialized{false};
-
-    FFTWGlobalCleanup() = default;
-    ~FFTWGlobalCleanup() {
-        // Clean up RfftExecutor plans
-        {
-            std::lock_guard<std::mutex> lock(RfftExecutor::s_mutex);
-            for (auto& [key, plan] : RfftExecutor::s_plan_cache) {
-                fftwf_destroy_plan(plan);
-            }
-            RfftExecutor::s_plan_cache.clear();
-            spdlog::debug("Cleaned up {} RfftExecutor plans",
-                          RfftExecutor::s_plan_cache.size());
-        }
-
-        // Clean up IrfftExecutor plans
-        {
-            std::lock_guard<std::mutex> lock(IrfftExecutor::s_mutex);
-            for (auto& [key, plan] : IrfftExecutor::s_plan_cache) {
-                fftwf_destroy_plan(plan);
-            }
-            IrfftExecutor::s_plan_cache.clear();
-            spdlog::debug("Cleaned up {} IrfftExecutor plans",
-                          IrfftExecutor::s_plan_cache.size());
-        }
-        fftwf_cleanup_threads();
-        spdlog::debug("FFTW global cleanup completed");
-    }
-
-    FFTWGlobalCleanup(const FFTWGlobalCleanup&)            = delete;
-    FFTWGlobalCleanup& operator=(const FFTWGlobalCleanup&) = delete;
-    FFTWGlobalCleanup(FFTWGlobalCleanup&&)                 = delete;
-    FFTWGlobalCleanup& operator=(FFTWGlobalCleanup&&)      = delete;
-};
-
-// Static instance ensures cleanup on program exit
-FFTWGlobalCleanup g_fftw_cleanup; // NOLINT
+// NOTE: There is deliberately NO exit-time cleanup of FFTW plans/threads.
+// A previous static-destructor cleanup object ran during
+// __run_exit_handlers, after spdlog's lazily-created registry had already
+// been destroyed (LIFO atexit order) and concurrently-unordered with the
+// executors' inline-static plan caches/mutexes. Logging there dereferenced
+// a freed logger and could lock a freed (heap-recycled) mutex, hanging the
+// process in futex_wait on ~1/300 exits. FFTW plans and thread state are
+// process-lifetime resources; the kernel reclaims them at exit.
 } // namespace
 
 void ensure_fftw_threading(int nthreads) {
