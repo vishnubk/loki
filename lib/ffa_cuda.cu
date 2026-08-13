@@ -1,5 +1,6 @@
 #include "loki/algorithms/ffa.hpp"
 
+#include <format>
 #include <memory>
 
 #include <fmt/ranges.h>
@@ -23,6 +24,56 @@
 #include "loki/utils/workspace.hpp"
 
 namespace loki::algorithms {
+
+namespace {
+/**
+ * Fail fast with an actionable message when the FFA's up-front device
+ * allocations cannot fit, instead of a bare thrust bad_alloc mid-init.
+ * required_bytes must cover everything the caller is about to allocate.
+ */
+template <typename HostFoldT>
+void check_ffa_device_memory(const plans::FFAPlan<HostFoldT>& ffa_plan,
+                             SizeType nsamps,
+                             int device_id,
+                             std::string_view context) {
+    cuda_utils::CudaSetDeviceGuard device_guard(device_id);
+    // Two fold buffers (result + ping-pong workspace) dominate; coords,
+    // the device copies of the time series, and a fixed margin for the
+    // brute-fold/cuFFT internals cover the rest.
+    constexpr SizeType kMarginBytes = 512ULL << 20U;
+    const auto fold_bytes =
+        2 * ffa_plan.get_buffer_size() * sizeof(HostFoldT);
+    const auto coord_bytes =
+        static_cast<SizeType>(static_cast<double>(
+            ffa_plan.get_coord_memory_usage()) * (1ULL << 30U));
+    const auto ts_bytes  = 2 * nsamps * sizeof(float);
+    const auto required  = fold_bytes + coord_bytes + ts_bytes + kMarginBytes;
+    std::size_t free_b = 0, total_b = 0;
+    cuda_utils::check_cuda_call(cudaMemGetInfo(&free_b, &total_b),
+                                "cudaMemGetInfo failed");
+    if (required <= free_b) {
+        return;
+    }
+    constexpr double kGiB = static_cast<double>(1ULL << 30U);
+    throw std::runtime_error(std::format(
+        "{}: FFA does not fit on device {}: requires {:.2f} GiB "
+        "({:.2f} fold buffers [2x{:.2f}] + {:.2f} coords + {:.2f} time "
+        "series + {:.2f} margin) but only {:.2f} of {:.2f} GiB are free. "
+        "The fold-buffer size is set by the FFA plan geometry - reduce "
+        "bseg_ffa (halving it shrinks the buffer several-fold at the cost "
+        "of more pruning stages) or narrow the frequency chunk. "
+        "loki.libloki.plans.predict_ffa_memory(cfg) predicts this "
+        "requirement host-side without touching the GPU.",
+        context, device_id, static_cast<double>(required) / kGiB,
+        static_cast<double>(fold_bytes) / kGiB,
+        static_cast<double>(fold_bytes) / (2.0 * kGiB),
+        static_cast<double>(coord_bytes) / kGiB,
+        static_cast<double>(ts_bytes) / kGiB,
+        static_cast<double>(kMarginBytes) / kGiB,
+        static_cast<double>(free_b) / kGiB,
+        static_cast<double>(total_b) / kGiB));
+}
+} // namespace
 
 // FFACUDA::Impl implementation
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -616,6 +667,11 @@ compute_ffa_cuda(std::span<const float> ts_e,
                  bool quiet) {
     using HostFoldT = HostFoldType<FoldTypeCUDA>;
     timing::ScopedLogLevel scoped_log_level(quiet);
+    {
+        const plans::FFAPlan<HostFoldT> plan_check(cfg);
+        check_ffa_device_memory(plan_check, cfg.get_nsamps(), device_id,
+                                "compute_ffa_cuda");
+    }
     FFACUDA<FoldTypeCUDA> ffa(cfg, device_id);
     const plans::FFAPlan<HostFoldT>& ffa_plan = ffa.get_plan();
     const auto buffer_size                    = ffa_plan.get_buffer_size();
@@ -636,6 +692,11 @@ compute_ffa_cuda_device(std::span<const float> ts_e,
                         int device_id) {
     using HostFoldT   = HostFoldType<FoldTypeCUDA>;
     using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
+    {
+        const plans::FFAPlan<HostFoldT> plan_check(cfg);
+        check_ffa_device_memory(plan_check, cfg.get_nsamps(), device_id,
+                                "compute_ffa_cuda_device");
+    }
     FFACUDA<FoldTypeCUDA> ffa(cfg, device_id);
     const plans::FFAPlan<HostFoldT>& ffa_plan = ffa.get_plan();
     const auto buffer_size                    = ffa_plan.get_buffer_size();
@@ -654,6 +715,11 @@ compute_ffa_fourier_return_to_time_cuda(std::span<const float> ts_e,
                                         int device_id,
                                         bool quiet) {
     timing::ScopedLogLevel scoped_log_level(quiet);
+    {
+        const plans::FFAPlan<ComplexType> plan_check(cfg);
+        check_ffa_device_memory(plan_check, cfg.get_nsamps(), device_id,
+                                "compute_ffa_fourier_return_to_time_cuda");
+    }
     FFACUDA<ComplexTypeCUDA> ffa(cfg, device_id);
     const plans::FFAPlan<ComplexType>& ffa_plan = ffa.get_plan();
     const auto buffer_size_time = ffa_plan.get_buffer_size_time();

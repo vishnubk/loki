@@ -391,6 +391,37 @@ PYBIND11_MODULE(libloki, m) {
 
     // Plans submodule
     auto m_plans = m.def_submodule("plans", "Plans submodule");
+    m_plans.def(
+        "predict_ffa_memory",
+        [](const search::PulsarSearchConfig& cfg) {
+            // Host-only: builds the plans without touching any GPU. The
+            // *_buffer_gb values are the TOTAL of the two resident fold
+            // buffers (result + ping-pong), i.e. what FFA init allocates;
+            // add coords_gb + the time series + ~0.5 GiB margin to predict
+            // the device requirement (the same formula the CUDA pre-check
+            // enforces).
+            const plans::FFAPlan<float> plan_time(cfg);
+            const plans::FFAPlan<ComplexType> plan_fourier(cfg);
+            py::dict d;
+            d["time_buffer_gb"]    = plan_time.get_buffer_memory_usage();
+            d["fourier_buffer_gb"] = plan_fourier.get_buffer_memory_usage();
+            d["coords_gb"]         = plan_time.get_coord_memory_usage();
+            d["time_fold_gb"] =
+                static_cast<float>(plan_time.get_fold_size() * sizeof(float)) /
+                static_cast<float>(1ULL << 30U);
+            d["fourier_fold_gb"] =
+                static_cast<float>(plan_fourier.get_fold_size() *
+                                   sizeof(ComplexType)) /
+                static_cast<float>(1ULL << 30U);
+            d["n_levels"]     = plan_time.get_n_levels();
+            d["ncoords_last"] = plan_time.get_ncoords().back();
+            return d;
+        },
+        py::arg("cfg"),
+        "Predict FFA device-memory demand (GB) for a search config, "
+        "host-side. Keys: time_buffer_gb / fourier_buffer_gb (both resident "
+        "fold buffers at FFA init), coords_gb, time_fold_gb / "
+        "fourier_fold_gb (final fold alone), n_levels, ncoords_last.");
     PYBIND11_NUMPY_DTYPE(coord::FFACoord, i_tail, shift_tail, i_head,
                          shift_head);
     PYBIND11_NUMPY_DTYPE(coord::FFACoordFreq, idx, shift);
